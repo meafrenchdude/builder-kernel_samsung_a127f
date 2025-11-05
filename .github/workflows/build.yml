@@ -77,6 +77,8 @@ jobs:
             export LOCALVERSION="-AFrenchKernel_Basic_Beta"
           fi
           
+          bash $(pwd)/build_kernel.sh kernel --jobs $(nproc --all) $DEFCONFIG
+          
           echo "TITLE=Galaxy `echo $DEVICE_ID` Kernel" >> $GITHUB_ENV
 
           mv .config build_config.txt
