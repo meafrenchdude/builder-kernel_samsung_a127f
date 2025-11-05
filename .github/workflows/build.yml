@@ -3,10 +3,6 @@ name: Build Kernel
 on:
   workflow_dispatch:
     inputs:
-      BRANCH:
-        description: Kernel branch
-        default: 'main'
-        required: true
       AK3_NAME:
         description: Enter custom name for AnyKernel3 artifact
         required: true
@@ -24,7 +20,7 @@ jobs:
         with:
           repository: meafrenchdude/kernel_samsung_a127f
           path: kernel_root
-          ref: ${{ github.event.inputs.BRANCH }}
+          ref: main
           show-progress: false
           fetch-depth: 0
           submodules: 'recursive'
