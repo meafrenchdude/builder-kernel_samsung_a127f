@@ -11,7 +11,12 @@ on:
         description: Enter custom name for AnyKernel3 artifact
         required: true
         default: "AFrenchKernel_KernelSU-Next_v"
-      
+      CCACHE:
+         description: enable or disable ccache
+         type: boolean
+         required: false
+         default: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,10 +31,20 @@ jobs:
           fetch-depth: 0
           submodules: 'recursive'
 
+      - name: Cache ccache
+        if: ${{ github.event.inputs.CCACHE == 'true' }}
+        uses: actions/cache@v6
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.event.inputs.LOCALVERSION }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.event.inputs.LOCALVERSION }}-
+            ccache-${{ runner.os }}-
+
       - name: Prepare dependencies + fetch tags
         run: |
           sudo apt update -y
-          sudo apt install bc cpio flex bison aptitude git python-is-python3 tar perl wget curl lz4 -y
+          sudo apt install bc cpio flex bison aptitude git python-is-python3 tar perl wget curl lz4 ccache -y
           sudo aptitude install libssl-dev -y
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch --tags --force
@@ -44,59 +59,99 @@ jobs:
         run: |
           sudo rm /etc/localtime
           sudo ln -s /usr/share/zoneinfo/Europe/Paris /etc/localtime
- 
+
       - name: Build kernel
         id: buildKernel
-        run: |  
+        run: |
+          set -o pipefail
           export PATH=$(pwd)/toolchains/clang/bin:$PATH
-          echo $PATH
           export CROSS_COMPILE=$(pwd)/toolchains/google/bin/aarch64-linux-android-
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export KBUILD_BUILD_USER="meafrenchude"
           export KBUILD_BUILD_HOST="github"
           export BUILD_START=`date`
           export IS_CI=true
-          
 
           export DEFCONFIG="exynos850-a12snsxx_defconfig"
           export DEVICE_ID="A12s"
           export KERNEL_SOURCE="https://github.com/meafrenchdude/kernel_samsung_a127f"
-          
+
+          # ---- ccache setup ----
+          if [ "${{ github.event.inputs.CCACHE }}" = "true" ]; then
+            export USE_CCACHE=1
+            export CCACHE_DIR="$HOME/.ccache"
+            export CCACHE_COMPRESS=1
+            export CCACHE_MAXSIZE=5G
+            mkdir -p "$CCACHE_DIR"
+            ccache --max-size=$CCACHE_MAXSIZE
+            echo "=== ccache stats before build ==="
+            ccache -s
+
+            # Masquerade the toolchain compilers as ccache so they're
+            # transparently intercepted regardless of build_kernel.sh support.
+            mkdir -p "$HOME/.ccache-bin"
+            ln -sf "$(command -v ccache)" "$HOME/.ccache-bin/clang"
+            ln -sf "$(command -v ccache)" "$HOME/.ccache-bin/clang++"
+            ln -sf "$(command -v ccache)" "$HOME/.ccache-bin/aarch64-linux-android-gcc"
+            ln -sf "$(command -v ccache)" "$HOME/.ccache-bin/aarch64-linux-android-g++"
+            export PATH="$HOME/.ccache-bin:$PATH"
+          fi
+
+          echo "PATH=$PATH"
+
           # Apply localversion from workflow input
-          
           if [ -n "${{ github.event.inputs.LOCALVERSION }}" ]; then
             export LOCALVERSION="${{ github.event.inputs.LOCALVERSION }}"
           else
             export LOCALVERSION="-AFrenchKernel_KernelSU-Next_Beta"
           fi
-          
-          bash $(pwd)/build_kernel.sh kernel --jobs $(nproc --all) $DEFCONFIG
 
+          bash $(pwd)/build_kernel.sh kernel --jobs $(nproc --all) $DEFCONFIG 2>&1 | tee build.log
 
-
-
+          if [ "${{ github.event.inputs.CCACHE }}" = "true" ]; then
+            echo "=== ccache stats after build ==="
+            ccache -s
+          fi
 
           KSU_REV_COUNT=$(cd KernelSU-Next && git rev-list --count HEAD)
-          	KSU_VERSION=$(expr 10200 + $KSU_REV_COUNT)
-          
+          KSU_VERSION=$(expr 10200 + $KSU_REV_COUNT)
+
           echo "- KernelSU version: $KSU_VERSION"
-        
+
           echo -e "Localversion: $(./scripts/setlocalversion)\n\nClang version: $(clang -v 2>&1 | grep ' version ' | sed 's/[[:space:]]*$//')\n\nBuild: $BUILD_START\n\nDefconfig: $DEFCONFIG\n\nSELinux: $SELINUX_STATE\n\nKernelSU-Next: $KSU_VERSION\n\nSUSFS: $SUSFS_VERSION\n\nSource: $KERNEL_SOURCE" > buildDetails.txt
 
-          
           echo "TITLE=Galaxy `echo $DEVICE_ID` Kernel" >> $GITHUB_ENV
 
           mv .config build_config.txt
           gitsha1=$(git rev-parse --short HEAD)
           buildDetails="`make kernelversion`-`echo $DEVICE`_`echo $gitsha1`-`date +'%Y%m%d%H%M%S'`" && echo "buildDetails=$buildDetails" >> $GITHUB_OUTPUT
 
+      - name: Extract build errors
+        if: failure()
+        run: |
+          echo "### Build Errors" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -iE "error:|error |fatal|undefined reference|No such file or directory" build.log | tail -n 150 >> "$GITHUB_STEP_SUMMARY" \
+            || echo "No lines matched common error patterns — see full build.log artifact." >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-${{ github.run_id }}
+          path: build.log
+          if-no-files-found: warn
+
       - name: Upload config
+        if: success()
         uses: actions/upload-artifact@v7
         with:
          name: Config-${{ steps.buildKernel.outputs.buildDetails }}
          path: build_config.txt
 
       - name: Upload kernel images
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: Kernel-${{ steps.buildKernel.outputs.buildDetails }}
@@ -106,22 +161,25 @@ jobs:
             arch/arm64/boot/dts/samsung/*.dtb
 
       - name: Copy Image to AnyKernel3
+        if: success()
         run: |
           cp arch/arm64/boot/Image anykernel3/
 
       - name: Upload AnyKernel3
+        if: success()
         uses: actions/upload-artifact@v7
         with:
           name: AnyKernel3-${{ github.event.inputs.AK3_NAME }}
           path: anykernel3/*
           compression-level: 9
 
-      - name: Create AnyKernel3 ZIP 
+      - name: Create AnyKernel3 ZIP
+        if: success()
         run: |
           cd anykernel3
           zip -r9 "AnyKernel3-${{ github.event.inputs.AK3_NAME }}.zip" ./*
           ls -lh "AnyKernel3-${{ github.event.inputs.AK3_NAME }}.zip"
-          
+
       - name: Generate changelog
         id: changelog
         run: |
@@ -135,7 +193,6 @@ jobs:
           changelog=$(git log "${latest_tag}..HEAD" --pretty=format:"- %s (%an)" --no-merges)
           fi
 
-                # Save changelog to output
           echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
           echo "$changelog" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -145,13 +202,3 @@ jobs:
         run: |
           TAG_NAME="build-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
-        
-
-
-
-
-        
-
-        
-
-      
