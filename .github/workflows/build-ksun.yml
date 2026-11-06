@@ -6,19 +6,28 @@ on:
       LOCALVERSION:
         description: Kernel localversion
         required: true
-        default: "-AFrenchKernel_KernelSU-Next_v"
+        default: "-AFrenchKernel_Fleur_v"
       AK3_NAME:
         description: Enter custom name for AnyKernel3 artifact
         required: true
-        default: "AFrenchKernel_KernelSU-Next_v"
+        default: "AFrenchKernel_Fleur_v"
+      BETA:
+        description: Beta build
+        type: boolean
+        required: false
+        default: true
+      BETA_TAG:
+        description: Beta Tag
+        type: string
+        required: false
       CCACHE:
-         description: enable or disable ccache
+         description: CCache
          type: boolean
          required: false
          default: true
 
 jobs:
-  build:
+  build-kernel:
     runs-on: ubuntu-latest
 
     steps:
@@ -103,7 +112,10 @@ jobs:
           if [ -n "${{ github.event.inputs.LOCALVERSION }}" ]; then
             export LOCALVERSION="${{ github.event.inputs.LOCALVERSION }}"
           else
-            export LOCALVERSION="-AFrenchKernel_KernelSU-Next_Beta"
+            export LOCALVERSION="-AFrenchKernel_Fleur_Unknown"
+            if [ "${{ github.event.inputs.BETA }}" = "true" ]; then
+              export LOCALVERSION="${LOCALVERSION}-beta${{ github.event.inputs.BETA_TAG }}"
+            fi
           fi
 
           bash $(pwd)/build_kernel.sh kernel --jobs $(nproc --all) $DEFCONFIG 2>&1 | tee build.log
@@ -160,10 +172,19 @@ jobs:
             arch/arm64/boot/dts/exynos/*.dtb
             arch/arm64/boot/dts/samsung/*.dtb
 
-      - name: Copy Image to AnyKernel3
+      - name: Copy Image to AnyKernel3 and prepare the AnyKernel3 name
         if: success()
         run: |
           cp arch/arm64/boot/Image anykernel3/
+          if [ -n "${{ github.event.inputs.AK3_VER }}" ]; then
+            AK3_NAME="${{ github.event.inputs.AK3_VER }}"
+          else
+            AK3_NAME="AFrenchKernel_Fleur_Unknown"
+            if [ "${{ github.event.inputs.BETA }}" = "true" ]; then
+              AK3_NAME="${AK3_NAME}-b${{ github.event.inputs.BETA_TAG }}"
+            fi
+          fi
+          echo "AK3_NAME=$AK3_NAME" >> "$GITHUB_ENV"
 
       - name: Upload AnyKernel3
         if: success()
